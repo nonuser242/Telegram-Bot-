@@ -1,4 +1,3 @@
 python-telegram-bot>=22.0
 yt-dlp
 requests
-curl-cffi
