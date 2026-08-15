@@ -6,7 +6,9 @@ import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
+import requests
 import yt_dlp
+
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -23,7 +25,7 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Telegram bot upload safety limit
+# Telegram Bot API safety limit
 MAX_FILE_SIZE = 49 * 1024 * 1024
 
 URL_REGEX = re.compile(
@@ -41,24 +43,8 @@ TIKTOK_HOSTS = {
 
 
 # =========================================================
-# HELPERS
+# URL HELPERS
 # =========================================================
-
-def get_hostname(url: str) -> str:
-    try:
-        return (urlparse(url).hostname or "").lower()
-    except Exception:
-        return ""
-
-
-def is_tiktok(url: str) -> bool:
-    host = get_hostname(url)
-
-    return (
-        host in TIKTOK_HOSTS
-        or host.endswith(".tiktok.com")
-    )
-
 
 def extract_url(text: str):
     match = URL_REGEX.search(text)
@@ -71,29 +57,39 @@ def extract_url(text: str):
     )
 
 
+def get_hostname(url: str):
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def is_tiktok(url: str):
+    host = get_hostname(url)
+
+    return (
+        host in TIKTOK_HOSTS
+        or host.endswith(".tiktok.com")
+    )
+
+
 # =========================================================
-# RESOLVE SHORT LINKS
+# RESOLVE SHORT URL
 # =========================================================
 
-def resolve_url(url: str) -> str:
+def resolve_url(url: str):
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Linux; Android 13) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/131.0 Mobile Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
 
     try:
-        import requests
-
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 13; "
-                "Pixel 7) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/131.0 "
-                "Mobile Safari/537.36"
-            ),
-            "Accept": (
-                "text/html,application/xhtml+xml,"
-                "application/xml;q=0.9,*/*;q=0.8"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-
         response = requests.get(
             url,
             headers=headers,
@@ -109,17 +105,17 @@ def resolve_url(url: str) -> str:
         if final_url:
             return final_url
 
-    except Exception as e:
+    except Exception as error:
         print(
-            "Short-link resolution failed:",
-            repr(e)
+            "URL resolve error:",
+            repr(error)
         )
 
     return url
 
 
 # =========================================================
-# YT-DLP DOWNLOAD
+# DOWNLOAD
 # =========================================================
 
 def download_media(
@@ -129,76 +125,72 @@ def download_media(
 
     output_template = os.path.join(
         output_dir,
-        "%(title).70s-%(id)s.%(ext)s"
+        "%(title).80s-%(id)s.%(ext)s"
     )
 
-    options = {
-
-        # Best quality while preferring MP4.
+    ydl_opts = {
+        # Best available quality.
+        # Prefer MP4 when possible.
         "format": (
-            "bv*[ext=mp4]+ba[ext=m4a]/"
-            "b[ext=mp4]/"
-            "bv*+ba/"
-            "b"
+            "bestvideo[ext=mp4]+"
+            "bestaudio[ext=m4a]/"
+            "best[ext=mp4]/"
+            "bestvideo+bestaudio/"
+            "best"
         ),
 
         "outtmpl": output_template,
 
+        # Merge audio + video.
         "merge_output_format": "mp4",
 
-        # IMPORTANT:
-        # Never download playlists.
+        # Don't download playlists.
         "noplaylist": True,
 
-        # Retry.
+        # Retries.
         "retries": 5,
         "fragment_retries": 5,
 
-        # Timeout.
+        # Network timeout.
         "socket_timeout": 30,
 
-        # Network.
-        "http_chunk_size": 10485760,
-
-        # Filename.
+        # Better filenames.
         "restrictfilenames": True,
 
-        # Cleaner.
+        # Cleaner logs.
         "quiet": True,
         "no_warnings": True,
 
-        # Don't download unnecessary things.
+        # No unnecessary files.
         "writethumbnail": False,
         "writesubtitles": False,
         "writeautomaticsub": False,
 
-        # Keep temporary files inside temp directory.
-        "nopart": False,
+        # Continue interrupted downloads.
+        "continuedl": True,
 
-        # Avoid playlists.
-        "extract_flat": False,
+        # Don't download files known to be larger.
+        "max_filesize": MAX_FILE_SIZE,
     }
 
     # =====================================================
-    # TIKTOK SETTINGS
+    # TIKTOK
     # =====================================================
 
     if is_tiktok(url):
 
-        options["http_headers"] = {
+        ydl_opts["http_headers"] = {
             "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 13; "
-                "Pixel 7) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/131.0 "
-                "Mobile Safari/537.36"
+                "Mozilla/5.0 (Linux; Android 13) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/131.0 Mobile Safari/537.36"
             ),
             "Referer": "https://www.tiktok.com/",
             "Accept-Language": "en-US,en;q=0.9",
         }
 
-        # yt-dlp supports TikTok extractor arguments
-        # such as app_name, app_version and API hostname.
-        options["extractor_args"] = {
+        ydl_opts["extractor_args"] = {
             "tiktok": {
                 "api_hostname": [
                     "api16-normal-c-useast1a.tiktokv.com"
@@ -219,34 +211,10 @@ def download_media(
         }
 
     # =====================================================
-    # CURL_CFFI IF INSTALLED
+    # DOWNLOAD WITH YT-DLP
     # =====================================================
 
-    try:
-        import curl_cffi
-
-        options["impersonate"] = "chrome"
-
-        print(
-            "curl_cffi detected:",
-            getattr(
-                curl_cffi,
-                "__version__",
-                "installed"
-            )
-        )
-
-    except Exception:
-        print(
-            "curl_cffi not installed; "
-            "using normal HTTP client."
-        )
-
-    # =====================================================
-    # DOWNLOAD
-    # =====================================================
-
-    with yt_dlp.YoutubeDL(options) as ydl:
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
 
         info = ydl.extract_info(
             url,
@@ -258,44 +226,44 @@ def download_media(
                 "yt-dlp returned no information."
             )
 
-        prepared = Path(
+        prepared_file = Path(
             ydl.prepare_filename(info)
         )
 
         candidates = [
-            prepared,
-            prepared.with_suffix(".mp4"),
-            prepared.with_suffix(".mkv"),
-            prepared.with_suffix(".webm"),
-            prepared.with_suffix(".mov"),
-            prepared.with_suffix(".m4v"),
+            prepared_file,
+            prepared_file.with_suffix(".mp4"),
+            prepared_file.with_suffix(".mkv"),
+            prepared_file.with_suffix(".webm"),
+            prepared_file.with_suffix(".mov"),
+            prepared_file.with_suffix(".m4v"),
         ]
 
-        for candidate in candidates:
+        for file_path in candidates:
 
-            if candidate.exists():
+            if file_path.exists():
 
                 return (
-                    str(candidate),
+                    str(file_path),
                     info
                 )
 
-        # Fallback search.
+        # Fallback: search directory.
         files = [
-            p
-            for p in Path(output_dir).iterdir()
-            if p.is_file()
+            file
+            for file in Path(output_dir).iterdir()
+            if file.is_file()
         ]
 
         if files:
 
-            largest = max(
+            largest_file = max(
                 files,
-                key=lambda p: p.stat().st_size
+                key=lambda file: file.stat().st_size
             )
 
             return (
-                str(largest),
+                str(largest_file),
                 info
             )
 
@@ -315,17 +283,18 @@ async def start(
 
     await update.message.reply_text(
         "👋 Soo dhawoow!\n\n"
-        "🎬 Ii soo dir video link.\n\n"
-        "Waxaan taageeraa websites badan "
-        "oo yt-dlp leeyahay extractor.\n\n"
-        "📌 Tusaale:\n"
-        "TikTok\n"
-        "YouTube\n"
-        "Instagram\n"
-        "Facebook\n"
-        "X/Twitter\n"
-        "iyo kuwo kale.\n\n"
-        "🔗 Link-ga soo dir..."
+        "🎬 Waxaan ahay Multi-Site Video Downloader.\n\n"
+        "🔗 Ii soo dir video link.\n\n"
+        "Waxaan isku dayayaa websites badan "
+        "oo yt-dlp taageero.\n\n"
+        "Tusaale:\n"
+        "• TikTok\n"
+        "• YouTube\n"
+        "• Instagram\n"
+        "• Facebook\n"
+        "• X/Twitter\n"
+        "• Websites kale\n\n"
+        "⬇️ Link-ga soo dir..."
     )
 
 
@@ -340,13 +309,12 @@ async def help_command(
 
     await update.message.reply_text(
         "📖 Sida loo isticmaalo:\n\n"
-        "1️⃣ Copy video link\n"
-        "2️⃣ Bot-ka ugu soo dir\n"
-        "3️⃣ Sug download-ka\n"
-        "4️⃣ Video-ga Telegram ayuu kuu soo dirayaa 🎬\n\n"
+        "1️⃣ Copy garee video link.\n"
+        "2️⃣ Bot-ka ugu soo dir.\n"
+        "3️⃣ Sug download-ka.\n"
+        "4️⃣ Bot-ku Telegram ayuu kuu soo dirayaa.\n\n"
         "⚠️ Private/login/blocked videos "
-        "lama soo dejin karo haddii website-ku "
-        "u baahan yahay authentication."
+        "waxaa laga yaabaa inaan la soo dejin karin."
     )
 
 
@@ -360,14 +328,16 @@ async def about(
 ):
 
     await update.message.reply_text(
-        "🤖 Multi-Site Downloader\n\n"
-        "Python + Telegram Bot API + yt-dlp\n\n"
-        "🎬 Link → Download → Telegram"
+        "🤖 Multi-Site Video Downloader\n\n"
+        "⚙️ Python\n"
+        "⚙️ yt-dlp\n"
+        "⚙️ python-telegram-bot\n\n"
+        "🔗 Link → Download → Telegram"
     )
 
 
 # =========================================================
-# HANDLE VIDEO LINK
+# HANDLE LINK
 # =========================================================
 
 async def handle_link(
@@ -393,12 +363,15 @@ async def handle_link(
         return
 
     status = await update.message.reply_text(
-        "🔎 Link-ga waan hubinayaa..."
+        "🔎 Link-ga waan hubinayaa...\n"
+        "⏳ Fadlan sug."
     )
 
     temp_dir = tempfile.mkdtemp(
-        prefix="video_bot_"
+        prefix="telegram_video_"
     )
+
+    resolved_url = original_url
 
     try:
 
@@ -416,12 +389,12 @@ async def handle_link(
         )
 
         print(
-            "Original:",
+            "Original URL:",
             original_url
         )
 
         print(
-            "Resolved:",
+            "Resolved URL:",
             resolved_url
         )
 
@@ -444,30 +417,35 @@ async def handle_link(
             temp_dir
         )
 
+        # =================================================
+        # CHECK FILE
+        # =================================================
+
         if not os.path.exists(video_path):
 
             raise FileNotFoundError(
-                "Video file does not exist."
+                "Downloaded video does not exist."
             )
 
-        # =================================================
-        # SIZE
-        # =================================================
-
-        size = os.path.getsize(
+        file_size = os.path.getsize(
             video_path
         )
 
-        if size > MAX_FILE_SIZE:
+        # =================================================
+        # SIZE CHECK
+        # =================================================
 
-            size_mb = size / (
+        if file_size > MAX_FILE_SIZE:
+
+            size_mb = file_size / (
                 1024 * 1024
             )
 
             await status.edit_text(
                 "❌ Video-ga aad buu u weyn yahay.\n\n"
                 f"📦 Size: {size_mb:.1f} MB\n"
-                "📌 Limit-ka bot-kan: ~49 MB."
+                "📌 Bot-kan wuxuu aqbalayaa "
+                "qiyaastii 49 MB."
             )
 
             return
@@ -494,10 +472,6 @@ async def handle_link(
             "📤 Telegram ayaan kuu dirayaa..."
         )
 
-        await update.message.chat.send_action(
-            ChatAction.UPLOAD_VIDEO
-        )
-
         extension = (
             Path(video_path)
             .suffix
@@ -509,20 +483,29 @@ async def handle_link(
             ".m4v",
             ".mov",
             ".webm",
-            ".mkv"
+            ".mkv",
+            ".avi"
         }
 
+        # =================================================
+        # SEND VIDEO
+        # =================================================
+
         if extension in video_extensions:
+
+            await update.message.chat.send_action(
+                ChatAction.UPLOAD_VIDEO
+            )
 
             try:
 
                 with open(
                     video_path,
                     "rb"
-                ) as media:
+                ) as video:
 
                     await update.message.reply_video(
-                        video=media,
+                        video=video,
                         caption=caption,
                         supports_streaming=True,
                         read_timeout=180,
@@ -534,24 +517,28 @@ async def handle_link(
             except Exception as upload_error:
 
                 print(
-                    "Video upload error:",
+                    "Video upload failed:",
                     repr(upload_error)
                 )
 
-                # Fallback document upload.
+                # Fallback to document.
                 with open(
                     video_path,
                     "rb"
-                ) as media:
+                ) as video:
 
                     await update.message.reply_document(
-                        document=media,
+                        document=video,
                         caption=caption,
                         read_timeout=180,
                         write_timeout=180,
                         connect_timeout=30,
                         pool_timeout=30,
                     )
+
+        # =================================================
+        # SEND AS DOCUMENT
+        # =================================================
 
         else:
 
@@ -562,10 +549,10 @@ async def handle_link(
             with open(
                 video_path,
                 "rb"
-            ) as media:
+            ) as video:
 
                 await update.message.reply_document(
-                    document=media,
+                    document=video,
                     caption=caption,
                     read_timeout=180,
                     write_timeout=180,
@@ -573,13 +560,14 @@ async def handle_link(
                     pool_timeout=30,
                 )
 
+        # Delete status.
         try:
             await status.delete()
         except Exception:
             pass
 
     # =====================================================
-    # DOWNLOAD ERROR
+    # YT-DLP ERROR
     # =====================================================
 
     except yt_dlp.utils.DownloadError as error:
@@ -593,21 +581,35 @@ async def handle_link(
 
         lower = error_text.lower()
 
-        if is_tiktok(resolved_url if "resolved_url" in locals() else original_url):
+        # TikTok-specific message.
+        if is_tiktok(resolved_url):
 
-            message = (
-                "❌ TikTok download-ku wuu fashilmay.\n\n"
-                "TikTok ayaa mararka qaar beddela "
-                "habka video-ga loo helo, waxaana jira "
-                "xaalado ay yt-dlp TikTok uga fashilanto "
-                "xitaa iyadoo version cusub la isticmaalayo.\n\n"
-                "🔄 Isku day link-ga mar kale."
-            )
+            if (
+                "unsupported" in lower
+                or "extract" in lower
+                or "video data" in lower
+                or "403" in lower
+                or "forbidden" in lower
+            ):
+
+                message = (
+                    "❌ TikTok video-ga lama soo dejin karin.\n\n"
+                    "TikTok ayaa xannibi kara request-ka "
+                    "ama beddeli kara habka video-ga loo helo.\n\n"
+                    "🔄 Isku day link-ga mar kale."
+                )
+
+            else:
+
+                message = (
+                    "❌ TikTok download-ku wuu fashilmay.\n\n"
+                    f"Error:\n{error_text[:800]}"
+                )
 
         elif "unsupported url" in lower:
 
             message = (
-                "❌ Website-kan yt-dlp ma taageero.\n\n"
+                "❌ Website-kan lama taageero.\n\n"
                 "🔗 Isku day link website kale."
             )
 
@@ -619,8 +621,7 @@ async def handle_link(
 
             message = (
                 "🔐 Video-ga wuxuu u baahan yahay login.\n\n"
-                "Bot-ku ma isticmaali karo account-kaaga "
-                "la'aanteed cookies/authentication."
+                "Bot-ku ma geli karo account gaar ah."
             )
 
         elif (
@@ -643,12 +644,13 @@ async def handle_link(
 
             message = (
                 "🚫 Website-ku wuxuu diiday request-ka.\n\n"
-                "Isku day link kale ama mar dambe."
+                "Isku day link kale."
             )
 
         elif (
             "too large" in lower
             or "filesize" in lower
+            or "file size" in lower
         ):
 
             message = (
@@ -660,8 +662,7 @@ async def handle_link(
 
             message = (
                 "❌ Video-ga lama soo dejin karin.\n\n"
-                "Sababta saxda ah:\n\n"
-                f"{error_text[:900]}"
+                f"Error:\n{error_text[:1000]}"
             )
 
         await status.edit_text(
@@ -681,7 +682,7 @@ async def handle_link(
 
         await status.edit_text(
             "❌ Wax ayaa qaldamay.\n\n"
-            f"Error: {str(error)[:700]}"
+            f"Error:\n{str(error)[:1000]}"
         )
 
     # =====================================================
@@ -720,7 +721,7 @@ def main():
     if not BOT_TOKEN:
 
         raise RuntimeError(
-            "BOT_TOKEN lama helin.\n"
+            "BOT_TOKEN lama helin.\n\n"
             "Ku dar BOT_TOKEN environment variable."
         )
 
@@ -730,6 +731,7 @@ def main():
         .build()
     )
 
+    # Commands
     app.add_handler(
         CommandHandler(
             "start",
@@ -751,6 +753,7 @@ def main():
         )
     )
 
+    # Links / text
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -758,30 +761,32 @@ def main():
         )
     )
 
+    # Errors
     app.add_error_handler(
         error_handler
     )
 
     print(
-        "================================"
+        "===================================="
     )
-
     print(
-        "🤖 VIDEO DOWNLOADER BOT"
+        "🤖 MULTI-SITE TELEGRAM DOWNLOADER"
     )
-
     print(
         "✅ Bot is running..."
     )
-
     print(
-        "================================"
+        "===================================="
     )
 
     app.run_polling(
         allowed_updates=Update.ALL_TYPES
     )
 
+
+# =========================================================
+# START BOT
+# =========================================================
 
 if __name__ == "__main__":
     main()
