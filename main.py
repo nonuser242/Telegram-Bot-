@@ -1,10 +1,12 @@
 import os
 import re
+import shutil
 import asyncio
 import tempfile
 from pathlib import Path
 
 import yt_dlp
+
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -15,64 +17,101 @@ from telegram.ext import (
     filters,
 )
 
-# =========================
-# SETTINGS
-# =========================
+
+# =========================================================
+# CONFIG
+# =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Telegram Bot API upload limit is commonly around 50 MB.
-# Keep a little margin so the upload has a better chance of succeeding.
+# Telegram upload limit is currently 50 MB.
+# We keep a small safety margin.
 MAX_FILE_SIZE = 49 * 1024 * 1024
 
-URL_REGEX = re.compile(
-    r"^https?://",
+URL_PATTERN = re.compile(
+    r"https?://[^\s]+",
     re.IGNORECASE
 )
 
 
-# =========================
-# COMMANDS
-# =========================
+# =========================================================
+# /START
+# =========================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     await update.message.reply_text(
         "👋 Soo dhawoow!\n\n"
-        "🎬 Ii soo dir link video ah.\n"
-        "Waxaan isku dayayaa inaan soo dejiyo kadibna Telegram-ka kuugu soo diro.\n\n"
-        "📌 Tusaale:\n"
-        "https://example.com/video\n\n"
-        "ℹ️ /help - Caawimaad"
+        "🎬 Waxaan ahay Video Downloader Bot.\n\n"
+        "🔗 Ii soo dir link video ah, tusaale:\n"
+        "TikTok\n"
+        "YouTube\n"
+        "Instagram\n"
+        "Facebook\n"
+        "X/Twitter\n"
+        "iyo websites kale oo yt-dlp taageero.\n\n"
+        "⏳ Link-ga soo dir oo sug..."
     )
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================================================
+# /HELP
+# =========================================================
+
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     await update.message.reply_text(
         "📖 Sida loo isticmaalo:\n\n"
-        "1️⃣ Copy garee link-ga video-ga\n"
+        "1️⃣ Copy garee video link\n"
         "2️⃣ Halkan bot-ka ugu soo dir\n"
-        "3️⃣ Sug inta uu download-ku dhammaanayo\n"
-        "4️⃣ Bot-ku video-ga ayuu kuu soo celinayaa 🎬\n\n"
-        "⚠️ Link-ga waa inuu noqdaa http ama https."
+        "3️⃣ Bot-ku wuxuu isku dayayaa inuu download-gareeyo\n"
+        "4️⃣ Kadib Telegram ayuu kuu soo dirayaa 🎬\n\n"
+        "✅ Links badan ayaa la taageeraa.\n"
+        "⚠️ Video aad u weyn ama website xannibay download "
+        "lama soo dejin karo."
     )
 
 
-async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================================================
+# /ABOUT
+# =========================================================
+
+async def about(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     await update.message.reply_text(
-        "🤖 Telegram Video Bot\n\n"
-        "Waxaa lagu dhisay Python + python-telegram-bot + yt-dlp."
+        "🤖 Multi-Site Video Downloader\n\n"
+        "⚙️ Python\n"
+        "⚙️ yt-dlp\n"
+        "⚙️ python-telegram-bot\n\n"
+        "🎬 Download → Telegram"
     )
 
 
-# =========================
-# DOWNLOAD FUNCTION
-# =========================
+# =========================================================
+# FIND URL
+# =========================================================
 
-def download_video(url: str, output_dir: str):
-    """
-    Runs yt-dlp synchronously.
-    This function is executed in a background thread.
-    """
+def extract_url(text: str):
+
+    match = URL_PATTERN.search(text)
+
+    if not match:
+        return None
+
+    return match.group(0).rstrip(".,!?)]}")
+
+
+# =========================================================
+# DOWNLOAD VIDEO
+# =========================================================
+
+def download_media(url: str, output_dir: str):
 
     output_template = os.path.join(
         output_dir,
@@ -80,131 +119,281 @@ def download_video(url: str, output_dir: str):
     )
 
     ydl_opts = {
-        # Prefer MP4 when available.
+
+        # Prefer MP4.
+        # If video/audio are separate, ffmpeg will merge them.
         "format": (
             "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
             "best[ext=mp4]/"
+            "bestvideo+bestaudio/"
             "best"
         ),
 
         "outtmpl": output_template,
 
-        # Merge video/audio into MP4 when ffmpeg is installed.
+        # Merge when possible.
         "merge_output_format": "mp4",
 
-        # Do not download playlists.
+        # Never download playlists.
         "noplaylist": True,
 
-        # Avoid keeping unnecessary files.
+        # Avoid extra files.
         "writethumbnail": False,
         "writesubtitles": False,
+        "writeautomaticsub": False,
 
-        # Quiet output.
+        # Cleaner logs.
         "quiet": True,
         "no_warnings": True,
 
-        # Respect websites' normal restrictions.
+        # Better filenames.
         "restrictfilenames": True,
+
+        # Continue when possible.
+        "continuedl": True,
+
+        # Don't download huge files when size is known.
+        "max_filesize": MAX_FILE_SIZE,
+
+        # Network retries.
+        "retries": 3,
+        "fragment_retries": 3,
+
+        # Timeout.
+        "socket_timeout": 30,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
 
-        downloaded_file = ydl.prepare_filename(info)
+        info = ydl.extract_info(
+            url,
+            download=True
+        )
 
-        # If ffmpeg merged the file into mp4, prepare_filename()
-        # may still point to the original extension.
-        possible_files = [
-            Path(downloaded_file),
-            Path(os.path.splitext(downloaded_file)[0] + ".mp4"),
-            Path(os.path.splitext(downloaded_file)[0] + ".mkv"),
-            Path(os.path.splitext(downloaded_file)[0] + ".webm"),
+        if not info:
+            raise RuntimeError(
+                "No media information returned."
+            )
+
+        prepared = Path(
+            ydl.prepare_filename(info)
+        )
+
+        # Possible output files after FFmpeg merge.
+        candidates = [
+            prepared,
+            prepared.with_suffix(".mp4"),
+            prepared.with_suffix(".mkv"),
+            prepared.with_suffix(".webm"),
+            prepared.with_suffix(".mov"),
+            prepared.with_suffix(".avi"),
         ]
 
-        for file_path in possible_files:
+        for file_path in candidates:
+
             if file_path.exists():
-                return str(file_path)
+                return str(file_path), info
 
-        # Last-resort search.
-        files = list(Path(output_dir).glob("*"))
+        # Search the temporary directory as fallback.
+        files = [
+            p for p in Path(output_dir).iterdir()
+            if p.is_file()
+        ]
 
-        if files:
-            return str(files[0])
+        if not files:
+            raise FileNotFoundError(
+                "Downloaded file was not found."
+            )
 
-        raise FileNotFoundError("Downloaded video file was not found.")
+        # Pick the largest file.
+        largest = max(
+            files,
+            key=lambda p: p.stat().st_size
+        )
+
+        return str(largest), info
 
 
-# =========================
-# HANDLE URL
-# =========================
+# =========================================================
+# HANDLE LINK
+# =========================================================
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_link(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
-    if not update.message or not update.message.text:
+    if not update.message:
         return
 
-    url = update.message.text.strip()
+    text = update.message.text or ""
 
-    # Check URL.
-    if not URL_REGEX.match(url):
+    url = extract_url(text)
+
+    if not url:
+
         await update.message.reply_text(
-            "❌ Taasi uma muuqato link sax ah.\n\n"
-            "Fadlan ii soo dir link bilaabanaya:\n"
+            "❌ Link ma helin.\n\n"
+            "Fadlan ii soo dir link bilaabanaya "
             "http:// ama https://"
         )
+
         return
 
     status = await update.message.reply_text(
-        "⏳ Video-ga waan soo dejinayaa...\n"
-        "Fadlan sug."
+        "🔎 Link-ga waan hubinayaa...\n"
+        "⏳ Fadlan sug."
     )
 
-    await update.message.chat.send_action(
-        ChatAction.TYPING
+    temp_dir = tempfile.mkdtemp(
+        prefix="telegram_downloader_"
     )
-
-    temp_dir = tempfile.mkdtemp(prefix="telegram_video_")
 
     try:
-        # Run yt-dlp outside the Telegram event loop.
-        video_path = await asyncio.to_thread(
-            download_video,
+
+        await update.message.chat.send_action(
+            ChatAction.TYPING
+        )
+
+        # Download in background thread so the bot
+        # can continue handling other Telegram events.
+        video_path, info = await asyncio.to_thread(
+            download_media,
             url,
             temp_dir
         )
 
-        # Check file exists.
         if not os.path.exists(video_path):
-            raise FileNotFoundError("Video file not found.")
 
-        file_size = os.path.getsize(video_path)
+            raise FileNotFoundError(
+                "Downloaded media does not exist."
+            )
 
-        # Check size before uploading.
+        file_size = os.path.getsize(
+            video_path
+        )
+
+        # =================================================
+        # SIZE CHECK
+        # =================================================
+
         if file_size > MAX_FILE_SIZE:
+
+            size_mb = file_size / (
+                1024 * 1024
+            )
+
             await status.edit_text(
                 "❌ Video-ga aad buu u weyn yahay.\n\n"
-                f"📦 Size: {file_size / (1024 * 1024):.1f} MB\n"
-                "📌 Fadlan isticmaal video ka yar 49 MB."
+                f"📦 Size: {size_mb:.1f} MB\n"
+                "📌 Limit-ka bot-kan: qiyaastii 49 MB."
             )
+
             return
 
+        # =================================================
+        # TITLE
+        # =================================================
+
+        title = info.get(
+            "title",
+            "Video"
+        )
+
+        # Telegram caption max is limited, so keep it short.
+        caption = (
+            f"🎬 {title[:700]}\n\n"
+            "🤖 Downloaded by Video Bot"
+        )
+
         await status.edit_text(
-            "✅ Download waa dhammaaday!\n"
-            "📤 Telegram ayaan u dirayaa..."
+            "✅ Download waa dhammaaday!\n\n"
+            "📤 Telegram ayaan kuu soo dirayaa..."
         )
 
         await update.message.chat.send_action(
             ChatAction.UPLOAD_VIDEO
         )
 
-        # Send video.
-        with open(video_path, "rb") as video_file:
+        suffix = Path(
+            video_path
+        ).suffix.lower()
 
-            await update.message.reply_video(
-                video=video_file,
-                supports_streaming=True,
-                caption="🎬 Video-gaaga waa kan!"
+        # =================================================
+        # SEND AS VIDEO
+        # =================================================
+
+        video_extensions = {
+            ".mp4",
+            ".m4v",
+            ".mov",
+            ".webm"
+        }
+
+        if suffix in video_extensions:
+
+            try:
+
+                with open(
+                    video_path,
+                    "rb"
+                ) as media:
+
+                    await update.message.reply_video(
+                        video=media,
+                        caption=caption,
+                        supports_streaming=True,
+                        read_timeout=120,
+                        write_timeout=120,
+                        connect_timeout=30,
+                        pool_timeout=30,
+                    )
+
+            except Exception as video_error:
+
+                print(
+                    "Video upload failed:",
+                    repr(video_error)
+                )
+
+                # Fallback: send as document.
+                with open(
+                    video_path,
+                    "rb"
+                ) as media:
+
+                    await update.message.reply_document(
+                        document=media,
+                        caption=caption,
+                        read_timeout=120,
+                        write_timeout=120,
+                        connect_timeout=30,
+                        pool_timeout=30,
+                    )
+
+        # =================================================
+        # SEND OTHER MEDIA AS DOCUMENT
+        # =================================================
+
+        else:
+
+            await update.message.chat.send_action(
+                ChatAction.UPLOAD_DOCUMENT
             )
+
+            with open(
+                video_path,
+                "rb"
+            ) as media:
+
+                await update.message.reply_document(
+                    document=media,
+                    caption=caption,
+                    read_timeout=120,
+                    write_timeout=120,
+                    connect_timeout=30,
+                    pool_timeout=30,
+                )
 
         # Remove status message.
         try:
@@ -212,70 +401,149 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    except yt_dlp.utils.DownloadError as e:
+    # =====================================================
+    # YT-DLP ERROR
+    # =====================================================
 
-        print("yt-dlp error:", e)
+    except yt_dlp.utils.DownloadError as error:
 
-        await status.edit_text(
-            "❌ Video-ga lama soo dejin karin.\n\n"
-            "Sababaha suuragalka ah:\n"
-            "• Link-ga ma shaqeynayo\n"
-            "• Video-ga lama heli karo\n"
-            "• Website-ku ma oggola download\n"
-            "• Video-ga wuxuu u baahan yahay login\n"
-            "• Website-ku wuxuu leeyahay restriction"
+        print(
+            "yt-dlp ERROR:",
+            repr(error)
         )
 
-    except Exception as e:
+        error_text = str(error).lower()
 
-        print("ERROR:", repr(e))
+        if (
+            "unsupported url" in error_text
+            or "no suitable extractor" in error_text
+        ):
+
+            message = (
+                "❌ Website-kan/link-kan lama taageerin.\n\n"
+                "💡 Isku day link kale."
+            )
+
+        elif (
+            "login" in error_text
+            or "sign in" in error_text
+            or "authentication" in error_text
+        ):
+
+            message = (
+                "🔐 Video-ga wuxuu u baahan yahay login.\n\n"
+                "Bot-ku ma geli karo account-kaaga "
+                "si automatic ah."
+            )
+
+        elif (
+            "private" in error_text
+            or "unavailable" in error_text
+            or "not available" in error_text
+        ):
+
+            message = (
+                "❌ Video-ga lama heli karo.\n\n"
+                "Waxaa laga yaabaa inuu private yahay "
+                "ama la tirtiray."
+            )
+
+        elif (
+            "403" in error_text
+            or "forbidden" in error_text
+            or "blocked" in error_text
+        ):
+
+            message = (
+                "🚫 Website-ku wuxuu xannibay request-ka bot-ka.\n\n"
+                "Isku day link kale ama mar dambe."
+            )
+
+        elif (
+            "filesize" in error_text
+            or "too large" in error_text
+        ):
+
+            message = (
+                "📦 Video-ga aad buu u weyn yahay.\n\n"
+                "Fadlan isticmaal video ka yar 49 MB."
+            )
+
+        else:
+
+            message = (
+                "❌ Download-ku wuu fashilmay.\n\n"
+                "Sababtu waxay noqon kartaa:\n"
+                "• Link khaldan\n"
+                "• Website restriction\n"
+                "• Video private ah\n"
+                "• Website-ku login ayuu rabaa\n"
+                "• Website-ku hadda lama taageero"
+            )
+
+        await status.edit_text(
+            message
+        )
+
+    # =====================================================
+    # OTHER ERROR
+    # =====================================================
+
+    except Exception as error:
+
+        print(
+            "BOT ERROR:",
+            repr(error)
+        )
 
         await status.edit_text(
             "❌ Wax ayaa qaldamay.\n\n"
-            "Fadlan hubi link-ga kadib isku day mar kale."
+            "Fadlan hubi link-ga oo isku day mar kale."
         )
 
-    finally:
-        # Delete temporary files.
-        try:
-            for file in Path(temp_dir).glob("*"):
-                try:
-                    file.unlink()
-                except Exception:
-                    pass
+    # =====================================================
+    # CLEANUP
+    # =====================================================
 
-            try:
-                Path(temp_dir).rmdir()
-            except Exception:
-                pass
+    finally:
+
+        try:
+
+            shutil.rmtree(
+                temp_dir,
+                ignore_errors=True
+            )
 
         except Exception:
             pass
 
 
-# =========================
+# =========================================================
 # ERROR HANDLER
-# =========================
+# =========================================================
 
 async def error_handler(
     update: object,
     context: ContextTypes.DEFAULT_TYPE
 ):
+
     print(
         "Telegram error:",
         repr(context.error)
     )
 
 
-# =========================
+# =========================================================
 # MAIN
-# =========================
+# =========================================================
 
 def main():
 
     if not BOT_TOKEN:
+
         raise RuntimeError(
-            "BOT_TOKEN environment variable is missing."
+            "BOT_TOKEN lama helin.\n"
+            "Set garee BOT_TOKEN environment variable."
         )
 
     app = (
@@ -286,34 +554,62 @@ def main():
 
     # Commands.
     app.add_handler(
-        CommandHandler("start", start)
-    )
-
-    app.add_handler(
-        CommandHandler("help", help_command)
-    )
-
-    app.add_handler(
-        CommandHandler("about", about)
-    )
-
-    # Messages containing URLs.
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_message
+        CommandHandler(
+            "start",
+            start
         )
     )
 
-    # Error handler.
-    app.add_error_handler(error_handler)
+    app.add_handler(
+        CommandHandler(
+            "help",
+            help_command
+        )
+    )
 
-    print("🤖 Telegram Video Bot is running...")
+    app.add_handler(
+        CommandHandler(
+            "about",
+            about
+        )
+    )
+
+    # Any normal text containing a URL.
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_link
+        )
+    )
+
+    app.add_error_handler(
+        error_handler
+    )
+
+    print(
+        "===================================="
+    )
+
+    print(
+        "🤖 Multi-Site Telegram Bot"
+    )
+
+    print(
+        "✅ Bot is running..."
+    )
+
+    print(
+        "===================================="
+    )
 
     app.run_polling(
         allowed_updates=Update.ALL_TYPES
     )
 
+
+# =========================================================
+# START
+# =========================================================
 
 if __name__ == "__main__":
     main()
